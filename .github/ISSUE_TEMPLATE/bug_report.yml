@@ -1,0 +1,36 @@
+name: Bug report
+description: Report a reproducible problem in MacPins
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: textarea
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open MacPins
+        2. Pin a window
+        3. …
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: MacPins version
+      placeholder: 0.7.6
+    validations:
+      required: true
+  - type: input
+    attributes:
+      label: macOS version
+      placeholder: macOS 15.6
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Additional context
+      description: Add screenshots or screen recordings if they help.

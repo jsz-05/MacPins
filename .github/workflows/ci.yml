@@ -1,0 +1,31 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  universal-build:
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compile with warnings as errors
+        run: swift build -Xswiftc -warnings-as-errors
+      - name: Build universal app
+        env:
+          MACPINS_CODE_SIGN_IDENTITY: "-"
+        run: zsh build-app.sh
+      - name: Verify architectures and signature
+        run: |
+          file dist/MacPins.app/Contents/MacOS/MacPins
+          lipo -archs dist/MacPins.app/Contents/MacOS/MacPins | grep -q arm64
+          lipo -archs dist/MacPins.app/Contents/MacOS/MacPins | grep -q x86_64
+          codesign --verify --deep --strict dist/MacPins.app
+      - name: Package test artifact
+        run: ditto -c -k --sequesterRsrc --keepParent dist/MacPins.app MacPins-ci.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MacPins-universal
+          path: MacPins-ci.zip

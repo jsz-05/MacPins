@@ -1,0 +1,21 @@
+name: Feature request
+description: Suggest a focused improvement to MacPins
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    attributes:
+      label: Problem
+      description: What workflow or limitation would this improve?
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Proposed behavior
+      description: Describe how you would like MacPins to behave.
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: Alternatives considered
+      description: Include any workarounds you currently use.
