@@ -4,8 +4,8 @@ import ApplicationServices
 final class PinManager {
     private(set) var pinnedWindows: [CGWindowID: ForeignWindow] = [:]
     private var overlays: [CGWindowID: WindowOverlay] = [:]
-    private var readyWindowIDs: Set<CGWindowID> = []
     private var parkedSources: [CGWindowID: SourceWindowParking.Token] = [:]
+    private var pinOrder: [CGWindowID] = []
     private var activationObserver: NSObjectProtocol?
     private var terminationObserver: NSObjectProtocol?
     private var orderingGeneration = 0
@@ -13,10 +13,6 @@ final class PinManager {
     var onChange: (() -> Void)?
     var onNeedsAccessibility: (() -> Void)?
     var onError: ((String) -> Void)?
-
-    var sourceParkingEnabled: Bool {
-        UserDefaults.standard.bool(forKey: "parkSourcesAtScreenEdge")
-    }
 
     init() {
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -52,6 +48,10 @@ final class PinManager {
 
     func pin(window: ForeignWindow) {
         guard pinnedWindows[window.windowID] == nil else { return }
+        guard AXIsProcessTrusted() else {
+            onNeedsAccessibility?()
+            return
+        }
 
         let overlay = WindowOverlay(window: window)
         overlay.onUnpin = { [weak self] in
@@ -67,22 +67,39 @@ final class PinManager {
 
         pinnedWindows[window.windowID] = window
         overlays[window.windowID] = overlay
+        pinOrder.append(window.windowID)
         overlay.start()
         onChange?()
     }
 
     func unpin(windowID: CGWindowID) {
         guard pinnedWindows.removeValue(forKey: windowID) != nil else { return }
-        readyWindowIDs.remove(windowID)
-        parkedSources.removeValue(forKey: windowID)?.restore()
-        overlays.removeValue(forKey: windowID)?.closeOverlay()
+        pinOrder.removeAll { $0 == windowID }
+        let overlay = overlays.removeValue(forKey: windowID)
+        let destination = overlay.map {
+            WindowDetector.cgFrame(forAppKitFrame: $0.frame)
+        }
+        parkedSources.removeValue(forKey: windowID)?.restore(
+            to: destination,
+            bringToFront: true
+        )
+        overlay?.closeOverlay()
         onChange?()
     }
 
-    func unpinAll() {
-        parkedSources.values.forEach { $0.restore() }
+    func unpinAll(bringToFront: Bool = true) {
+        let frontWindowID = bringToFront ? pinOrder.last : nil
+        for (id, token) in parkedSources {
+            let destination = overlays[id].map {
+                WindowDetector.cgFrame(forAppKitFrame: $0.frame)
+            }
+            token.restore(
+                to: destination,
+                bringToFront: id == frontWindowID
+            )
+        }
         parkedSources.removeAll()
-        readyWindowIDs.removeAll()
+        pinOrder.removeAll()
         overlays.values.forEach { $0.closeOverlay() }
         overlays.removeAll()
         pinnedWindows.removeAll()
@@ -93,35 +110,22 @@ final class PinManager {
         overlays.values.forEach { $0.updateCollectionBehavior() }
     }
 
-    func setSourceParkingEnabled(_ enabled: Bool) {
-        UserDefaults.standard.set(enabled, forKey: "parkSourcesAtScreenEdge")
-        if enabled {
-            refreshSourceParking(requestPermissionIfNeeded: true)
-        } else {
-            parkedSources.values.forEach { $0.restore() }
-            parkedSources.removeAll()
-        }
-        onChange?()
-    }
-
-    func refreshSourceParking(requestPermissionIfNeeded: Bool = false) {
-        guard sourceParkingEnabled else { return }
+    private func captureBecameReady(windowID: CGWindowID) {
+        guard parkedSources[windowID] == nil,
+              let window = pinnedWindows[windowID] else { return }
         guard AXIsProcessTrusted() else {
-            if requestPermissionIfNeeded { onNeedsAccessibility?() }
+            unpin(windowID: windowID)
+            onNeedsAccessibility?()
             return
         }
-
-        for id in readyWindowIDs where parkedSources[id] == nil {
-            guard let window = pinnedWindows[id],
-                  let token = SourceWindowParking.park(window: window) else { continue }
-            parkedSources[id] = token
+        guard let token = SourceWindowParking.park(window: window) else {
+            unpin(windowID: windowID)
+            onError?(
+                "This application would not allow its window to be parked at the screen edge, so MacPins removed the pin without moving the source."
+            )
+            return
         }
-    }
-
-    private func captureBecameReady(windowID: CGWindowID) {
-        guard pinnedWindows[windowID] != nil else { return }
-        readyWindowIDs.insert(windowID)
-        refreshSourceParking()
+        parkedSources[windowID] = token
         reassertOverlayOrder()
     }
 
@@ -140,7 +144,12 @@ final class PinManager {
     }
 
     deinit {
-        parkedSources.values.forEach { $0.restore() }
+        for (id, token) in parkedSources {
+            let destination = overlays[id].map {
+                WindowDetector.cgFrame(forAppKitFrame: $0.frame)
+            }
+            token.restore(to: destination, bringToFront: false)
+        }
         if let activationObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
         }

@@ -7,15 +7,9 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     var onUnpinAll: (() -> Void)?
     var onEnableScreenRecording: (() -> Void)?
     var onEnableAccessibility: (() -> Void)?
-    var onSetSourceParking: ((Bool) -> Void)?
 
     private let pinnedWindowsLabel = NSTextField(labelWithString: "No windows are pinned.")
     private let unpinAllButton = NSButton(title: "Unpin All", target: nil, action: nil)
-    private let sourceParkingCheckbox = NSButton(
-        checkboxWithTitle: "Park the original window at the screen edge while pinned",
-        target: nil,
-        action: nil
-    )
     private let screenRecordingStatus = NSTextField(labelWithString: "Checking…")
     private let accessibilityStatus = NSTextField(labelWithString: "Checking…")
     private let screenRecordingButton = NSButton(title: "Enable…", target: nil, action: nil)
@@ -24,22 +18,22 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 620, height: 780),
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 650),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "MacPins"
-        window.minSize = NSSize(width: 580, height: 740)
+        window.minSize = NSSize(width: 560, height: 620)
         window.isReleasedWhenClosed = false
-        window.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 2)
+        window.level = .normal
         window.collectionBehavior = [.moveToActiveSpace]
         window.center()
 
         super.init(window: window)
         window.delegate = self
         window.contentViewController = makeContentViewController()
-        window.setContentSize(NSSize(width: 620, height: 780))
+        window.setContentSize(NSSize(width: 600, height: 650))
         window.center()
 
         let minimizeButton = window.standardWindowButton(.miniaturizeButton)
@@ -67,7 +61,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         NSApp.setActivationPolicy(.regular)
         NSRunningApplication.current.activate(options: [.activateAllWindows])
         window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
     }
 
     func updatePinnedWindows(_ windows: [ForeignWindow]) {
@@ -82,25 +75,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         unpinAllButton.isEnabled = !windows.isEmpty
     }
 
-    func updateSourceParking(enabled: Bool) {
-        sourceParkingCheckbox.state = enabled ? .on : .off
-        refreshPermissions()
-    }
-
     func updatePermissions(screenRecording: Bool, accessibility: Bool) {
         stylePermissionStatus(screenRecordingStatus, isEnabled: screenRecording)
         screenRecordingButton.isHidden = screenRecording
-
-        if accessibility {
-            accessibilityStatus.stringValue = "Enabled"
-            accessibilityStatus.textColor = .systemGreen
-        } else if sourceParkingCheckbox.state == .on {
-            accessibilityStatus.stringValue = "Required for parking"
-            accessibilityStatus.textColor = .systemOrange
-        } else {
-            accessibilityStatus.stringValue = "Optional"
-            accessibilityStatus.textColor = .secondaryLabelColor
-        }
+        stylePermissionStatus(accessibilityStatus, isEnabled: accessibility)
         accessibilityButton.isHidden = accessibility
     }
 
@@ -128,10 +106,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func enableAccessibility() {
         onEnableAccessibility?()
-    }
-
-    @objc private func toggleSourceParking() {
-        onSetSourceParking?(sourceParkingCheckbox.state == .on)
     }
 
     private func refreshPermissions() {
@@ -189,14 +163,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         shortcut.alignment = .center
 
         let usage = NSTextField(
-            wrappingLabelWithString: "Pinned views are deliberately view-only. Drag anywhere except the red pin to move the mirror; use the original app or its Picture in Picture controls to interact."
+            wrappingLabelWithString: "Pinned views are deliberately view-only. Drag anywhere except the red pin to move the mirror. When unpinned, the original window returns at the mirror's final position."
         )
         usage.font = .systemFont(ofSize: 12)
         usage.textColor = .secondaryLabelColor
         usage.alignment = .center
 
         let pinnedBox = makePinnedBox()
-        let sourceBox = makeSourceBox()
         let permissionsBox = makePermissionsBox()
 
         let hiddenBarIsRunning = NSWorkspace.shared.runningApplications.contains {
@@ -225,7 +198,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             shortcut,
             usage,
             pinnedBox,
-            sourceBox,
             permissionsBox,
             menuBarNotice,
             footer,
@@ -239,11 +211,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         stack.setCustomSpacing(12, after: shortcut)
         stack.setCustomSpacing(12, after: usage)
         stack.setCustomSpacing(12, after: pinnedBox)
-        stack.setCustomSpacing(12, after: sourceBox)
         stack.setCustomSpacing(12, after: permissionsBox)
         root.addSubview(stack)
 
-        [subtitle, usage, pinnedBox, sourceBox, permissionsBox, menuBarNotice, footer]
+        [subtitle, usage, pinnedBox, permissionsBox, menuBarNotice, footer]
             .forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
 
         NSLayoutConstraint.activate([
@@ -257,8 +228,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             usage.widthAnchor.constraint(equalTo: stack.widthAnchor),
             pinnedBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
             pinnedBox.heightAnchor.constraint(equalToConstant: 82),
-            sourceBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            sourceBox.heightAnchor.constraint(equalToConstant: 120),
             permissionsBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
             permissionsBox.heightAnchor.constraint(equalToConstant: 150),
             menuBarNotice.widthAnchor.constraint(equalTo: stack.widthAnchor),
@@ -291,23 +260,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         return boxedView(heading: heading, bodyViews: [row])
     }
 
-    private func makeSourceBox() -> NSBox {
-        let heading = NSTextField(labelWithString: "Optional source handling")
-        heading.font = .systemFont(ofSize: 13, weight: .semibold)
-
-        sourceParkingCheckbox.target = self
-        sourceParkingCheckbox.action = #selector(toggleSourceParking)
-        sourceParkingCheckbox.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let detail = NSTextField(
-            wrappingLabelWithString: "Experimental Chrome/video workaround: moves the real source almost entirely offscreen after capture starts, then restores its exact frame when you unpin. This can prevent video from freezing and hides the duplicate."
-        )
-        detail.font = .systemFont(ofSize: 10.5)
-        detail.textColor = .secondaryLabelColor
-
-        return boxedView(heading: heading, bodyViews: [sourceParkingCheckbox, detail])
-    }
-
     private func makePermissionsBox() -> NSBox {
         let heading = NSTextField(labelWithString: "Permissions")
         heading.font = .systemFont(ofSize: 13, weight: .semibold)
@@ -329,7 +281,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         )
         let accessibility = permissionRow(
             title: "Accessibility",
-            detail: "Optional; used only to park and restore the source window.",
+            detail: "Required to park the source and restore it at the pin's final position.",
             status: accessibilityStatus,
             button: accessibilityButton
         )

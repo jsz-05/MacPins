@@ -23,11 +23,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var hotKey: EventHotKeyRef?
     private var hotKeyEventHandler: EventHandlerRef?
+    private var needsRecoveryAttempt = true
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.applicationIconImage = AppIcon.bundled()
         createStatusItem()
         registerHotKey()
+        restoreStrandedSourcesIfPossible()
 
         let mainWindowController = MainWindowController()
         mainWindowController.onPinWindow = { [weak self] in self?.beginWindowSelection() }
@@ -38,9 +40,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         mainWindowController.onEnableScreenRecording = { [weak self] in
             self?.requestScreenRecordingPermission()
-        }
-        mainWindowController.onSetSourceParking = { [weak self] enabled in
-            self?.pinManager.setSourceParkingEnabled(enabled)
         }
         self.mainWindowController = mainWindowController
 
@@ -57,7 +56,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidBecomeActive(_ notification: Notification) {
-        pinManager.refreshSourceParking()
+        restoreStrandedSourcesIfPossible()
         updateMainWindow()
     }
 
@@ -71,7 +70,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         windowSelector.cancel(notify: false)
-        pinManager.unpinAll()
+        pinManager.unpinAll(bringToFront: false)
         if let hotKey { UnregisterEventHotKey(hotKey) }
         if let hotKeyEventHandler { RemoveEventHandler(hotKeyEventHandler) }
     }
@@ -176,12 +175,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             action: #selector(toggleAllSpaces(_:))
         )
         allSpaces.state = WindowOverlay.pinToAllSpaces ? .on : .off
-        let parkSources = addItem(
-            to: menu,
-            title: "Park Sources at Screen Edge (Experimental)",
-            action: #selector(toggleSourceParking(_:))
-        )
-        parkSources.state = pinManager.sourceParkingEnabled ? .on : .off
         addItem(to: menu, title: "Permissions…", action: #selector(showMainWindow))
 
         menu.addItem(.separator())
@@ -205,6 +198,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func beginWindowSelection() {
         guard !windowSelector.isSelecting else { return }
         guard screenCapturePermissionIsAvailable() else { return }
+        guard accessibilityPermissionIsAvailable() else { return }
         mainWindowController?.window?.orderOut(nil)
         windowSelector.begin { [weak self] window in
             guard let self else { return }
@@ -232,6 +226,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         guard screenCapturePermissionIsAvailable() else { return }
+        guard accessibilityPermissionIsAvailable() else { return }
         pinManager.pin(window: window)
     }
 
@@ -248,10 +243,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let enabled = !WindowOverlay.pinToAllSpaces
         UserDefaults.standard.set(enabled, forKey: "pinToAllSpaces")
         pinManager.updateAllSpacesSetting()
-    }
-
-    @objc private func toggleSourceParking(_ sender: NSMenuItem) {
-        pinManager.setSourceParkingEnabled(!pinManager.sourceParkingEnabled)
     }
 
     private func requestAccessibilityPermission() {
@@ -282,9 +273,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         openPrivacyPane("Privacy_ScreenCapture")
-        showError(
-            "Screen Recording is required to display a live pinned window. Enable MacPins in Privacy & Security → Screen & System Audio Recording, then reopen MacPins."
-        )
+        return false
+    }
+
+    private func accessibilityPermissionIsAvailable() -> Bool {
+        guard !AXIsProcessTrusted() else { return true }
+        requestAccessibilityPermission()
         return false
     }
 
@@ -293,6 +287,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             string: "x-apple.systempreferences:com.apple.preference.security?\(pane)"
         ) else { return }
         NSWorkspace.shared.open(url)
+    }
+
+    private func restoreStrandedSourcesIfPossible() {
+        guard needsRecoveryAttempt, AXIsProcessTrusted() else { return }
+        SourceWindowParking.restoreStrandedSources()
+        needsRecoveryAttempt = false
     }
 
     @objc private func showAbout() {
@@ -304,8 +304,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.informativeText = "A small DeskPins-style menu-bar utility for macOS.\n\n"
             + "Click the menu-bar pin and choose Pin a Window, or press Control-Command-P. "
             + "The pinned view is intentionally view-only: drag it to move the mirror and "
-            + "click the red badge to unpin. The optional source-parking mode can hide the "
-            + "duplicate source and help Chromium video keep rendering."
+            + "click the red badge to unpin. MacPins parks the original at the screen edge "
+            + "while pinned, then restores it at the mirror's final position."
         alert.alertStyle = .informational
         present(alert)
     }
@@ -325,7 +325,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             screenRecording: CGPreflightScreenCaptureAccess(),
             accessibility: AXIsProcessTrusted()
         )
-        mainWindowController?.updateSourceParking(enabled: pinManager.sourceParkingEnabled)
     }
 
     private func showError(_ message: String) {

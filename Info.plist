@@ -17,9 +17,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.7.0</string>
+    <string>0.7.3</string>
     <key>CFBundleVersion</key>
-    <string>12</string>
+    <string>15</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>LSMinimumSystemVersion</key>
@@ -29,6 +29,6 @@
     <key>NSScreenCaptureUsageDescription</key>
     <string>MacPins uses Screen Recording to display a live view of the window you choose to pin. It does not save recordings.</string>
     <key>NSAccessibilityUsageDescription</key>
-    <string>MacPins optionally uses Accessibility to park a source window at the screen edge while pinned and restore its exact position when unpinned.</string>
+    <string>MacPins uses Accessibility to park a source window at the screen edge while pinned and restore it at the pin's final position when unpinned.</string>
 </dict>
 </plist>

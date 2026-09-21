@@ -1,33 +1,83 @@
 import AppKit
 import ApplicationServices
 
-/// Optionally moves a source window almost entirely beyond the right edge of
-/// its current display. Keeping a few pixels onscreen prevents Chromium from
-/// treating the window as fully occluded, while the ScreenCaptureKit mirror
-/// continues to capture the complete window. The exact original frame is
-/// restored when the pin is removed.
+/// Moves a source window almost entirely beyond the right edge of its current
+/// display. Keeping a few pixels onscreen prevents Chromium from treating the
+/// window as fully occluded, while the ScreenCaptureKit mirror continues to
+/// capture the complete window.
 enum SourceWindowParking {
+    private static let recoveryDefaultsKey = "sourceWindowRecoveryRecords"
+
+    private struct RecoveryRecord: Codable {
+        let windowID: UInt32
+        let ownerPID: Int32
+        let ownerName: String
+        let bundleIdentifier: String?
+        let title: String
+        var x: Double
+        var y: Double
+        var width: Double
+        var height: Double
+        let bootTime: Double
+
+        var frame: CGRect {
+            CGRect(x: x, y: y, width: width, height: height)
+        }
+
+        mutating func setFrame(_ frame: CGRect) {
+            x = frame.origin.x
+            y = frame.origin.y
+            width = frame.width
+            height = frame.height
+        }
+    }
+
     final class Token {
+        private let windowID: CGWindowID
+        private let ownerPID: pid_t
         private let element: AXUIElement
         private let originalPosition: CGPoint
         private let originalSize: CGSize
         private var hasRestored = false
 
         fileprivate init(
+            windowID: CGWindowID,
+            ownerPID: pid_t,
             element: AXUIElement,
             originalPosition: CGPoint,
             originalSize: CGSize
         ) {
+            self.windowID = windowID
+            self.ownerPID = ownerPID
             self.element = element
             self.originalPosition = originalPosition
             self.originalSize = originalSize
         }
 
-        func restore() {
+        func restore(
+            to targetFrame: CGRect? = nil,
+            bringToFront: Bool = false
+        ) {
             guard !hasRestored else { return }
             hasRestored = true
-            SourceWindowParking.setSize(originalSize, on: element)
-            SourceWindowParking.setPosition(originalPosition, on: element)
+            let destination = targetFrame ?? CGRect(
+                origin: originalPosition,
+                size: originalSize
+            )
+            SourceWindowParking.updateRecovery(
+                windowID: windowID,
+                destination: destination
+            )
+            SourceWindowParking.setSize(destination.size, on: element)
+            if SourceWindowParking.setPosition(destination.origin, on: element) {
+                SourceWindowParking.removeRecovery(windowID: windowID)
+            }
+            if bringToFront {
+                SourceWindowParking.bringToFront(
+                    ownerPID: ownerPID,
+                    element: element
+                )
+            }
         }
 
         deinit {
@@ -56,8 +106,13 @@ enum SourceWindowParking {
             x: displayBounds.maxX - 4,
             y: originalPosition.y
         )
+        saveRecovery(
+            for: target,
+            destination: CGRect(origin: originalPosition, size: originalSize)
+        )
         guard setPosition(parkedPosition, on: element),
               let actualPosition = pointAttribute(kAXPositionAttribute, of: element) else {
+            removeRecovery(windowID: target.windowID)
             return nil
         }
 
@@ -66,14 +121,60 @@ enum SourceWindowParking {
         guard abs(actualPosition.x - originalPosition.x) > 20,
               visibleWidth <= 48 else {
             setPosition(originalPosition, on: element)
+            removeRecovery(windowID: target.windowID)
             return nil
         }
 
         return Token(
+            windowID: target.windowID,
+            ownerPID: target.ownerPID,
             element: element,
             originalPosition: originalPosition,
             originalSize: originalSize
         )
+    }
+
+    /// Restores windows left at the screen edge if MacPins was force-quit or
+    /// crashed before normal unpin cleanup could run.
+    static func restoreStrandedSources() {
+        guard AXIsProcessTrusted() else { return }
+        var records = loadRecoveryRecords()
+        let currentBootTime = bootTime
+
+        for (key, record) in records {
+            guard abs(record.bootTime - currentBootTime) < 10 else {
+                records.removeValue(forKey: key)
+                continue
+            }
+            guard let application = NSRunningApplication(
+                processIdentifier: record.ownerPID
+            ),
+            application.bundleIdentifier == record.bundleIdentifier,
+            let current = WindowDetector.windowInfo(windowID: record.windowID) else {
+                records.removeValue(forKey: key)
+                continue
+            }
+
+            let target = ForeignWindow(
+                windowID: record.windowID,
+                ownerPID: record.ownerPID,
+                ownerName: record.ownerName,
+                title: record.title,
+                bounds: current.bounds
+            )
+            let appElement = AXUIElementCreateApplication(record.ownerPID)
+            guard let element = matchingWindow(
+                in: appElement,
+                target: target,
+                currentBounds: current.bounds
+            ) else { continue }
+
+            setSize(record.frame.size, on: element)
+            if setPosition(record.frame.origin, on: element) {
+                records.removeValue(forKey: key)
+            }
+        }
+        saveRecoveryRecords(records)
     }
 
     private static func matchingWindow(
@@ -172,6 +273,25 @@ enum SourceWindowParking {
         return value as? String
     }
 
+    private static func bringToFront(ownerPID: pid_t, element: AXUIElement) {
+        guard let application = NSRunningApplication(
+            processIdentifier: ownerPID
+        ) else { return }
+        application.activate(options: [.activateAllWindows])
+        let appElement = AXUIElementCreateApplication(ownerPID)
+        AXUIElementSetAttributeValue(
+            appElement,
+            kAXFocusedWindowAttribute as CFString,
+            element
+        )
+        AXUIElementSetAttributeValue(
+            element,
+            kAXMainAttribute as CFString,
+            kCFBooleanTrue
+        )
+        AXUIElementPerformAction(element, kAXRaiseAction as CFString)
+    }
+
     private static func displayContainingMost(of window: CGRect) -> CGRect? {
         var count: UInt32 = 0
         guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else {
@@ -187,6 +307,62 @@ enum SourceWindowParking {
             .max { lhs, rhs in
                 lhs.intersection(window).area < rhs.intersection(window).area
             }
+    }
+
+    private static var bootTime: Double {
+        Date().timeIntervalSince1970 - ProcessInfo.processInfo.systemUptime
+    }
+
+    private static func saveRecovery(for target: ForeignWindow, destination: CGRect) {
+        var records = loadRecoveryRecords()
+        let bundleIdentifier = NSRunningApplication(
+            processIdentifier: target.ownerPID
+        )?.bundleIdentifier
+        records[String(target.windowID)] = RecoveryRecord(
+            windowID: target.windowID,
+            ownerPID: target.ownerPID,
+            ownerName: target.ownerName,
+            bundleIdentifier: bundleIdentifier,
+            title: target.title,
+            x: destination.origin.x,
+            y: destination.origin.y,
+            width: destination.width,
+            height: destination.height,
+            bootTime: bootTime
+        )
+        saveRecoveryRecords(records)
+    }
+
+    private static func updateRecovery(windowID: CGWindowID, destination: CGRect) {
+        var records = loadRecoveryRecords()
+        guard var record = records[String(windowID)] else { return }
+        record.setFrame(destination)
+        records[String(windowID)] = record
+        saveRecoveryRecords(records)
+    }
+
+    private static func removeRecovery(windowID: CGWindowID) {
+        var records = loadRecoveryRecords()
+        records.removeValue(forKey: String(windowID))
+        saveRecoveryRecords(records)
+    }
+
+    private static func loadRecoveryRecords() -> [String: RecoveryRecord] {
+        guard let data = UserDefaults.standard.data(forKey: recoveryDefaultsKey),
+              let records = try? JSONDecoder().decode(
+                [String: RecoveryRecord].self,
+                from: data
+              ) else { return [:] }
+        return records
+    }
+
+    private static func saveRecoveryRecords(_ records: [String: RecoveryRecord]) {
+        if records.isEmpty {
+            UserDefaults.standard.removeObject(forKey: recoveryDefaultsKey)
+            return
+        }
+        guard let data = try? JSONEncoder().encode(records) else { return }
+        UserDefaults.standard.set(data, forKey: recoveryDefaultsKey)
     }
 }
 

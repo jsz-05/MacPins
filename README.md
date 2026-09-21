@@ -7,7 +7,7 @@ of a FaceTime, Chrome, or other application window above normal windows.
 
 - macOS 14 Sonoma or later
 - Screen Recording permission (required for the live pinned view)
-- Accessibility permission (optional source-parking workaround only)
+- Accessibility permission (required to park and restore the source window)
 
 ## Use
 
@@ -15,17 +15,18 @@ of a FaceTime, Chrome, or other application window above normal windows.
    added to the macOS menu bar near the clock.
 2. Choose **Pin a Window…**, then click the window to pin.
 3. Drag the pinned view to move it smoothly without moving the source window.
-4. The pinned view is deliberately view-only. Use the original application or
-   its native Picture in Picture controls when you need to interact.
+4. The pinned view is deliberately view-only. Unpin it when you need to
+   interact with the original application.
 5. Click the red pin badge, select the checked window in the menu, or choose
-   **Unpin All** to remove a pin.
+   **Unpin All** to remove a pin. The original window returns at the pinned
+   view's final position and is brought to the front.
 
-The optional **Park Sources at Screen Edge** setting moves the original window
-almost entirely offscreen after live capture begins. This hides the duplicate
-and can keep Chromium video rendering when it would otherwise freeze because
-the source is fully covered. MacPins restores the source's exact frame when it
-is unpinned. This setting is experimental and requires Accessibility; the core
-view-only pin does not.
+After live capture begins, MacPins moves the original window almost entirely
+offscreen. This hides the duplicate and keeps Chromium video rendering when it
+would otherwise freeze because the source is fully covered. When unpinned, the
+source is restored at the pinned view's final position and size.
+If MacPins is force-quit while a source is parked, reopening MacPins restores
+the stranded window from a small local recovery record.
 
 Click the main window's yellow minimize button to hide the window and remove
 MacPins from the Dock. The menu-bar pin remains available. Opening `MacPins.app`
