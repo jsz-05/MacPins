@@ -66,6 +66,8 @@ brought to the front when you unpin it.
 | Screen Recording | Supplies the live pixels for the pinned view. MacPins never records or saves video. |
 | Accessibility | Parks, restores, positions, and raises the source window. |
 
+<img width="400" alt="Screenshot 2026-09-21 at 1 48 50 AM" src="https://github.com/user-attachments/assets/d1bfc811-8b31-4ad9-9b3e-e89e2e594696" />
+
 All capture and window management happen locally on your Mac. MacPins has no
 analytics, accounts, or network service.
 
