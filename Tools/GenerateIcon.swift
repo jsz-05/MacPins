@@ -47,17 +47,20 @@ for variant in variants {
     NSColor.clear.setFill()
     rect.fill()
 
+    // macOS app icons use generous optical padding inside the 1024-point
+    // canvas. Keeping the tile near 81% prevents it from appearing oversized
+    // next to Apple's Dock icons.
     let background = NSBezierPath(
-        roundedRect: rect.insetBy(dx: size * 0.055, dy: size * 0.055),
-        xRadius: size * 0.22,
-        yRadius: size * 0.22
+        roundedRect: rect.insetBy(dx: size * 0.095, dy: size * 0.095),
+        xRadius: size * 0.18,
+        yRadius: size * 0.18
     )
     NSGradient(
         starting: NSColor(calibratedRed: 0.98, green: 0.31, blue: 0.27, alpha: 1),
         ending: NSColor(calibratedRed: 0.72, green: 0.06, blue: 0.12, alpha: 1)
     )?.draw(in: background, angle: -90)
 
-    let symbolSize = size * 0.55
+    let symbolSize = size * 0.48
     if let symbol = NSImage(
         systemSymbolName: "pin.fill",
         accessibilityDescription: "MacPins"
