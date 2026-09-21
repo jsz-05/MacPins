@@ -7,6 +7,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     var onUnpinAll: (() -> Void)?
     var onEnableScreenRecording: (() -> Void)?
     var onEnableAccessibility: (() -> Void)?
+    var onSetOpenAtLogin: ((Bool) -> Void)?
+    var onOpenSupport: (() -> Void)?
 
     private let pinnedWindowsLabel = NSTextField(labelWithString: "No windows are pinned.")
     private let unpinAllButton = NSButton(title: "Unpin All", target: nil, action: nil)
@@ -14,17 +16,23 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let accessibilityStatus = NSTextField(labelWithString: "Checking…")
     private let screenRecordingButton = NSButton(title: "Enable…", target: nil, action: nil)
     private let accessibilityButton = NSButton(title: "Enable…", target: nil, action: nil)
+    private let openAtLoginCheckbox = NSButton(
+        checkboxWithTitle: "Open MacPins at Login",
+        target: nil,
+        action: nil
+    )
+    private let openAtLoginStatus = NSTextField(labelWithString: "Checking…")
     private var permissionTimer: Timer?
 
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 600, height: 650),
+            contentRect: NSRect(x: 0, y: 0, width: 600, height: 775),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "MacPins"
-        window.minSize = NSSize(width: 560, height: 620)
+        window.minSize = NSSize(width: 560, height: 745)
         window.isReleasedWhenClosed = false
         window.level = .normal
         window.collectionBehavior = [.moveToActiveSpace]
@@ -33,7 +41,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         super.init(window: window)
         window.delegate = self
         window.contentViewController = makeContentViewController()
-        window.setContentSize(NSSize(width: 600, height: 650))
+        window.setContentSize(NSSize(width: 600, height: 775))
         window.center()
 
         let minimizeButton = window.standardWindowButton(.miniaturizeButton)
@@ -42,6 +50,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             self?.refreshPermissions()
+            self?.updateLoginItemState(LoginItemManager.state)
         }
         RunLoop.main.add(timer, forMode: .common)
         permissionTimer = timer
@@ -58,6 +67,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     func show() {
         guard let window else { return }
         refreshPermissions()
+        updateLoginItemState(LoginItemManager.state)
         NSApp.setActivationPolicy(.regular)
         NSRunningApplication.current.activate(options: [.activateAllWindows])
         window.makeKeyAndOrderFront(nil)
@@ -80,6 +90,28 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         screenRecordingButton.isHidden = screenRecording
         stylePermissionStatus(accessibilityStatus, isEnabled: accessibility)
         accessibilityButton.isHidden = accessibility
+    }
+
+    func updateLoginItemState(_ state: LoginItemState) {
+        openAtLoginCheckbox.isEnabled = state != .unavailable
+        switch state {
+        case .enabled:
+            openAtLoginCheckbox.state = .on
+            openAtLoginStatus.stringValue = "Enabled"
+            openAtLoginStatus.textColor = .systemGreen
+        case .disabled:
+            openAtLoginCheckbox.state = .off
+            openAtLoginStatus.stringValue = "Off"
+            openAtLoginStatus.textColor = .secondaryLabelColor
+        case .requiresApproval:
+            openAtLoginCheckbox.state = .on
+            openAtLoginStatus.stringValue = "Needs approval"
+            openAtLoginStatus.textColor = .systemOrange
+        case .unavailable:
+            openAtLoginCheckbox.state = .off
+            openAtLoginStatus.stringValue = "Unavailable"
+            openAtLoginStatus.textColor = .secondaryLabelColor
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -106,6 +138,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
     @objc private func enableAccessibility() {
         onEnableAccessibility?()
+    }
+
+    @objc private func setOpenAtLogin(_ sender: NSButton) {
+        onSetOpenAtLogin?(sender.state == .on)
+    }
+
+    @objc private func openSupport() {
+        onOpenSupport?()
     }
 
     private func refreshPermissions() {
@@ -171,6 +211,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
 
         let pinnedBox = makePinnedBox()
         let permissionsBox = makePermissionsBox()
+        let startupBox = makeStartupBox()
 
         let hiddenBarIsRunning = NSWorkspace.shared.runningApplications.contains {
             $0.localizedName == "Hidden Bar"
@@ -189,6 +230,8 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         footer.font = .systemFont(ofSize: 11)
         footer.alignment = .center
 
+        let creatorRow = makeCreatorRow()
+
         let stack = NSStackView(views: [
             iconView,
             title,
@@ -199,8 +242,10 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             usage,
             pinnedBox,
             permissionsBox,
+            startupBox,
             menuBarNotice,
             footer,
+            creatorRow,
         ])
         stack.orientation = .vertical
         stack.alignment = .centerX
@@ -212,9 +257,11 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         stack.setCustomSpacing(12, after: usage)
         stack.setCustomSpacing(12, after: pinnedBox)
         stack.setCustomSpacing(12, after: permissionsBox)
+        stack.setCustomSpacing(12, after: startupBox)
+        stack.setCustomSpacing(4, after: footer)
         root.addSubview(stack)
 
-        [subtitle, usage, pinnedBox, permissionsBox, menuBarNotice, footer]
+        [subtitle, usage, pinnedBox, permissionsBox, startupBox, menuBarNotice, footer]
             .forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
 
         NSLayoutConstraint.activate([
@@ -230,11 +277,45 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             pinnedBox.heightAnchor.constraint(equalToConstant: 82),
             permissionsBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
             permissionsBox.heightAnchor.constraint(equalToConstant: 150),
+            startupBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            startupBox.heightAnchor.constraint(equalToConstant: 84),
             menuBarNotice.widthAnchor.constraint(equalTo: stack.widthAnchor),
             footer.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
 
         return controller
+    }
+
+    private func makeCreatorRow() -> NSView {
+        let credit = NSTextField(labelWithString: "By \(AppLinks.creatorName)")
+        credit.font = .systemFont(ofSize: 11)
+        credit.textColor = .tertiaryLabelColor
+
+        let separator = NSTextField(labelWithString: "•")
+        separator.font = .systemFont(ofSize: 11)
+        separator.textColor = .tertiaryLabelColor
+
+        let support = NSButton(
+            title: "Support on Ko-fi",
+            target: self,
+            action: #selector(openSupport)
+        )
+        support.isBordered = false
+        support.font = .systemFont(ofSize: 11, weight: .medium)
+        support.contentTintColor = .systemPink
+        support.image = NSImage(
+            systemSymbolName: "heart.fill",
+            accessibilityDescription: "Support"
+        )?.withSymbolConfiguration(
+            NSImage.SymbolConfiguration(pointSize: 10, weight: .semibold)
+        )
+        support.imagePosition = .imageLeading
+
+        let row = NSStackView(views: [credit, separator, support])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        return row
     }
 
     private func makePinnedBox() -> NSBox {
@@ -286,6 +367,35 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             button: accessibilityButton
         )
         return boxedView(heading: heading, bodyViews: [screen, accessibility])
+    }
+
+    private func makeStartupBox() -> NSBox {
+        let heading = NSTextField(labelWithString: "Startup")
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        openAtLoginCheckbox.target = self
+        openAtLoginCheckbox.action = #selector(setOpenAtLogin(_:))
+        openAtLoginCheckbox.font = .systemFont(ofSize: 12, weight: .medium)
+
+        let explanation = NSTextField(
+            labelWithString: "Launch MacPins automatically after you sign in."
+        )
+        explanation.font = .systemFont(ofSize: 10.5)
+        explanation.textColor = .secondaryLabelColor
+        let labels = NSStackView(views: [openAtLoginCheckbox, explanation])
+        labels.orientation = .vertical
+        labels.alignment = .leading
+        labels.spacing = 1
+
+        openAtLoginStatus.font = .systemFont(ofSize: 11, weight: .medium)
+        openAtLoginStatus.setContentHuggingPriority(.required, for: .horizontal)
+        labels.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let row = NSStackView(views: [labels, openAtLoginStatus])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        return boxedView(heading: heading, bodyViews: [row])
     }
 
     private func permissionRow(

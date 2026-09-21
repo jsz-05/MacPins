@@ -32,7 +32,17 @@ Click the main window's yellow minimize button to hide the window and remove
 MacPins from the Dock. The menu-bar pin remains available. Opening `MacPins.app`
 again restores its window and Dock icon.
 
+Enable **Open MacPins at Login** in the main window's Startup section, or
+**Open at Login** from the menu-bar pin, to launch it automatically after you
+sign in. macOS may ask you to approve the login item in System Settings.
+
 The global **Control-Command-P** shortcut toggles the current frontmost window.
+
+## Support
+
+MacPins is created by Jeffrey Zhou and released free of charge. If it is useful
+to you, you can support future open-source apps at
+[ko-fi.com/jeffreyszhou](https://ko-fi.com/jeffreyszhou).
 
 ## Build
 

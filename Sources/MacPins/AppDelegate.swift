@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import Carbon
+import ServiceManagement
 
 private let hotKeySignature: OSType = 0x4D50494E // "MPIN"
 private let hotKeyID: UInt32 = 1
@@ -41,6 +42,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         mainWindowController.onEnableScreenRecording = { [weak self] in
             self?.requestScreenRecordingPermission()
         }
+        mainWindowController.onSetOpenAtLogin = { [weak self] enabled in
+            self?.setOpenAtLogin(enabled)
+        }
+        mainWindowController.onOpenSupport = { [weak self] in self?.openSupportPage() }
         self.mainWindowController = mainWindowController
 
         pinManager.onChange = { [weak self] in
@@ -175,9 +180,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             action: #selector(toggleAllSpaces(_:))
         )
         allSpaces.state = WindowOverlay.pinToAllSpaces ? .on : .off
+        let openAtLogin = addItem(
+            to: menu,
+            title: "Open at Login",
+            action: #selector(toggleOpenAtLogin)
+        )
+        switch LoginItemManager.state {
+        case .enabled:
+            openAtLogin.state = .on
+        case .requiresApproval:
+            openAtLogin.state = .mixed
+        case .disabled:
+            openAtLogin.state = .off
+        case .unavailable:
+            openAtLogin.state = .off
+            openAtLogin.isEnabled = false
+        }
         addItem(to: menu, title: "Permissions…", action: #selector(showMainWindow))
 
         menu.addItem(.separator())
+        let support = addItem(
+            to: menu,
+            title: "Support MacPins on Ko-fi…",
+            action: #selector(openSupportPage)
+        )
+        support.image = NSImage(
+            systemSymbolName: "heart.fill",
+            accessibilityDescription: "Support"
+        )
         addItem(to: menu, title: "About MacPins", action: #selector(showAbout))
         addItem(to: menu, title: "Quit MacPins", action: #selector(quit), keyEquivalent: "q")
     }
@@ -245,6 +275,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pinManager.updateAllSpacesSetting()
     }
 
+    @objc private func toggleOpenAtLogin() {
+        let shouldEnable = LoginItemManager.state == .disabled
+        setOpenAtLogin(shouldEnable)
+    }
+
+    private func setOpenAtLogin(_ enabled: Bool) {
+        do {
+            try LoginItemManager.setEnabled(enabled)
+            updateMainWindow()
+            if enabled, LoginItemManager.state == .requiresApproval {
+                openLoginItemsSettings()
+            }
+        } catch {
+            updateMainWindow()
+            showError("MacPins could not update Open at Login: \(error.localizedDescription)")
+        }
+    }
+
+    private func openLoginItemsSettings() {
+        SMAppService.openSystemSettingsLoginItems()
+    }
+
     private func requestAccessibilityPermission() {
         guard !AXIsProcessTrusted() else {
             updateMainWindow()
@@ -305,9 +357,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             + "Click the menu-bar pin and choose Pin a Window, or press Control-Command-P. "
             + "The pinned view is intentionally view-only: drag it to move the mirror and "
             + "click the red badge to unpin. MacPins parks the original at the screen edge "
-            + "while pinned, then restores it at the mirror's final position."
+            + "while pinned, then restores it at the mirror's final position.\n\n"
+            + "Created by \(AppLinks.creatorName)."
         alert.alertStyle = .informational
-        present(alert)
+        alert.addButton(withTitle: "OK")
+        alert.addButton(withTitle: "Support on Ko-fi")
+        if present(alert) == .alertSecondButtonReturn {
+            openSupportPage()
+        }
+    }
+
+    @objc private func openSupportPage() {
+        NSWorkspace.shared.open(AppLinks.supportURL)
     }
 
     @objc private func showMainWindow() {
@@ -325,6 +386,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             screenRecording: CGPreflightScreenCaptureAccess(),
             accessibility: AXIsProcessTrusted()
         )
+        mainWindowController?.updateLoginItemState(LoginItemManager.state)
     }
 
     private func showError(_ message: String) {
@@ -335,9 +397,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         present(alert)
     }
 
-    private func present(_ alert: NSAlert) {
+    @discardableResult
+    private func present(_ alert: NSAlert) -> NSApplication.ModalResponse {
         NSRunningApplication.current.activate(options: [.activateAllWindows])
-        alert.runModal()
+        return alert.runModal()
     }
 
     @objc private func quit() {
