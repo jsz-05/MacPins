@@ -19,12 +19,25 @@ cp "Info.plist" "$app_dir/Contents/Info.plist"
 iconset_dir="$project_dir/.build-icon/AppIcon.iconset"
 swift "$project_dir/Tools/GenerateIcon.swift" "$iconset_dir"
 iconutil -c icns "$iconset_dir" -o "$app_dir/Contents/Resources/AppIcon.icns"
-signing_identity="${MACPINS_CODE_SIGN_IDENTITY:-Apple Development: jeffreyzhou3@icloud.com (84Z3774UP9)}"
-if ! security find-identity -v -p codesigning | grep -Fq "\"$signing_identity\""; then
-    echo "Required stable code-signing identity was not found: $signing_identity" >&2
-    exit 1
+signing_identity="${MACPINS_CODE_SIGN_IDENTITY:-}"
+if [[ -z "$signing_identity" ]]; then
+    signing_identity="$(security find-identity -v -p codesigning 2>/dev/null \
+        | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -n 1)"
 fi
-codesign --force --deep --timestamp=none --identifier app.macpins.utility \
-    --sign "$signing_identity" "$app_dir"
+if [[ -z "$signing_identity" ]]; then
+    signing_identity="$(security find-identity -v -p codesigning 2>/dev/null \
+        | sed -n 's/.*"\(Apple Development:.*\)"/\1/p' | head -n 1)"
+fi
+if [[ -z "$signing_identity" ]]; then
+    signing_identity="-"
+fi
+
+if [[ "$signing_identity" == Developer\ ID\ Application:* ]]; then
+    codesign --force --deep --options runtime --timestamp \
+        --identifier app.macpins.utility --sign "$signing_identity" "$app_dir"
+else
+    codesign --force --deep --timestamp=none --identifier app.macpins.utility \
+        --sign "$signing_identity" "$app_dir"
+fi
 
 echo "$app_dir"
