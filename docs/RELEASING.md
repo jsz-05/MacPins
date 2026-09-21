@@ -1,52 +1,55 @@
 # Releasing MacPins
 
-MacPins is distributed outside the Mac App Store. A low-friction public release
-must be signed with a **Developer ID Application** certificate, use the hardened
-runtime, and be notarized by Apple. An Apple Development signature is suitable
-for local development but not public distribution.
+MacPins is distributed outside the Mac App Store. GitHub releases can be made
+without a paid Apple Developer Program membership. Those builds are ad-hoc
+signed, not notarized, and require the Gatekeeper **Open Anyway** step on first
+launch. Always explain that clearly to users.
 
-## One-time setup
+## Free release process
 
-1. Join the paid Apple Developer Program.
-2. Create a Developer ID Application certificate and export it as a password-
-   protected `.p12` file.
-3. Create an app-specific password for the Apple ID used for notarization.
-4. Add these GitHub Actions repository secrets:
+1. Update `CFBundleShortVersionString` and `CFBundleVersion` in `Info.plist`.
+2. Build and test both architectures, then package the app:
 
-   | Secret | Value |
-   | --- | --- |
-   | `APPLE_ID` | Apple ID used for notarization |
-   | `APPLE_TEAM_ID` | Ten-character Apple Developer Team ID |
-   | `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password |
-   | `BUILD_CERTIFICATE_BASE64` | Base64-encoded `.p12` certificate |
-   | `BUILD_CERTIFICATE_PASSWORD` | Password used when exporting the `.p12` |
-   | `DEVELOPER_ID_APPLICATION` | Full certificate name, such as `Developer ID Application: Name (TEAMID)` |
-   | `KEYCHAIN_PASSWORD` | A strong temporary CI keychain password |
+   ```sh
+   MACPINS_CODE_SIGN_IDENTITY=- zsh build-app.sh
+   zsh scripts/build-dmg.sh
+   ```
 
-Never commit these values to the repository.
+3. Create the ZIP and checksums:
 
-## Publish a release
+   ```sh
+   ditto -c -k --sequesterRsrc --keepParent dist/MacPins.app dist/MacPins.zip
+   shasum -a 256 dist/MacPins.dmg dist/MacPins.zip > dist/SHA256SUMS.txt
+   ```
+4. Create and push a version tag, such as `v0.7.6`, after the release commit.
+5. Publish a normal GitHub Release with the DMG, ZIP, checksum file, install
+   instructions, and an explicit unnotarized-app warning.
+6. Download the DMG from GitHub on another Mac or a clean user account and
+   verify installation, both permissions, pinning, unpinning, login launch,
+   and the Gatekeeper instructions.
 
-Preview builds without Developer ID credentials can be built locally with
-`MACPINS_CODE_SIGN_IDENTITY=- zsh build-app.sh` and
-`zsh scripts/build-dmg.sh`. Publish them only as GitHub pre-releases with a
-`-preview` tag and clearly state that they are not notarized. Preview tags are
-excluded from the signed release workflow.
+## Optional notarized releases later
 
-For a full release:
+A lower-friction public release requires a **Developer ID Application**
+certificate, hardened runtime, and Apple notarization. This requires the paid
+Apple Developer Program. The optional `Optional signed release` GitHub Actions
+workflow is manual-only; ordinary version tags do not trigger it.
 
-Update `CFBundleShortVersionString` and `CFBundleVersion` in `Info.plist`, merge
-the release commit, then create and push a matching tag:
+To use that workflow, create a Developer ID Application certificate, export it
+as a password-protected `.p12`, create an app-specific password for notarization,
+and set these GitHub repository secrets:
 
-```sh
-git tag v0.7.6
-git push origin v0.7.6
-```
+| Secret | Value |
+| --- | --- |
+| `APPLE_ID` | Apple ID used for notarization |
+| `APPLE_TEAM_ID` | Apple Developer Team ID |
+| `APPLE_APP_SPECIFIC_PASSWORD` | App-specific password |
+| `BUILD_CERTIFICATE_BASE64` | Base64-encoded `.p12` certificate |
+| `BUILD_CERTIFICATE_PASSWORD` | Password used when exporting the `.p12` |
+| `DEVELOPER_ID_APPLICATION` | Full certificate name |
+| `KEYCHAIN_PASSWORD` | Strong temporary CI keychain password |
 
-The `Signed release` workflow builds a universal app, signs it with Developer
-ID, submits both the app and DMG to Apple's notarization service, staples the
-tickets, creates checksums, and publishes the artifacts as a GitHub Release.
-
-Before announcing a release, download the DMG from GitHub on a different Mac
-or a clean user account and verify installation, both permissions, pinning,
-unpinning, login launch, and Gatekeeper acceptance.
+Never commit these values to the repository. Start the workflow manually with
+an existing version tag that does not yet have a GitHub release. It builds the
+universal app, signs and notarizes it, staples the tickets, and publishes the
+downloads.

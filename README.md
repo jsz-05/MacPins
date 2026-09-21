@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/jsz-05/MacPins/releases"><img alt="Preview release" src="https://img.shields.io/badge/release-preview-orange?style=flat-square"></a>
+  <a href="https://github.com/jsz-05/MacPins/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/jsz-05/MacPins?style=flat-square"></a>
   <a href="https://github.com/jsz-05/MacPins/releases"><img alt="Downloads" src="https://img.shields.io/github/downloads/jsz-05/MacPins/total?style=flat-square"></a>
   <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-blue?style=flat-square"></a>
   <img alt="macOS 14+" src="https://img.shields.io/badge/macOS-14%2B-black?style=flat-square&logo=apple">
@@ -34,18 +34,18 @@ while you work in other apps.
 
 ## Install
 
-1. Open [Releases](https://github.com/jsz-05/MacPins/releases) and download
-   `MacPins.dmg` from the latest preview.
+1. Open the [latest release](https://github.com/jsz-05/MacPins/releases/latest)
+   and download `MacPins.dmg`.
 2. Open the disk image and drag `MacPins.app` into Applications.
 3. Open MacPins and approve **Screen Recording** and **Accessibility** when
    prompted.
 4. Choose **Pin a Window…** from the app or menu-bar pin, then click a window.
 
 The universal build supports both Apple silicon and Intel Macs. **The current
-preview is ad-hoc signed and not notarized.** On first launch, macOS may block
+download is ad-hoc signed and not notarized.** On first launch, macOS may block
 it. If you trust this project's source and download, first try opening the app,
-then go to **System Settings → Privacy & Security → Open Anyway**. This extra
-step will go away once a Developer ID-signed and notarized release is available.
+then go to **System Settings → Privacy & Security → Open Anyway**. This is a
+one-time Gatekeeper step for the current distribution method.
 
 ## How to use it
 
@@ -89,8 +89,7 @@ when one is available and otherwise falls back to ad-hoc signing for local
 builds.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development details and
-[docs/RELEASING.md](docs/RELEASING.md) for the signed and notarized release
-process.
+[docs/RELEASING.md](docs/RELEASING.md) for the release process.
 
 ## Support
 

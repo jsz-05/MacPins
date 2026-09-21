@@ -1,8 +1,12 @@
-name: Signed release
+name: Optional signed release
 
 on:
-  push:
-    tags: ["v*", "!v*-preview*"]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing tag to notarize and publish
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -19,9 +23,12 @@ jobs:
       BUILD_CERTIFICATE_PASSWORD: ${{ secrets.BUILD_CERTIFICATE_PASSWORD }}
       DEVELOPER_ID_APPLICATION: ${{ secrets.DEVELOPER_ID_APPLICATION }}
       KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag }}
 
       - name: Check release credentials
         run: |
@@ -80,9 +87,9 @@ jobs:
 
       - name: Publish GitHub release
         run: |
-          gh release create "$GITHUB_REF_NAME" \
+          gh release create "$RELEASE_TAG" \
             dist/MacPins.dmg \
             dist/MacPins.zip \
             dist/SHA256SUMS.txt \
             --generate-notes \
-            --title "MacPins $GITHUB_REF_NAME"
+            --title "MacPins $RELEASE_TAG"
