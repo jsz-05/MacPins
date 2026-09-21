@@ -152,11 +152,18 @@ private final class SelectionView: NSView {
             .foregroundColor: NSColor.white,
         ]
         let size = message.size(withAttributes: attributes)
+        let menuBarInset: CGFloat
+        if let screen = window?.screen {
+            menuBarInset = max(0, screen.frame.maxY - screen.visibleFrame.maxY)
+        } else {
+            menuBarInset = 38
+        }
+        let panelHeight = size.height + 16
         let panelRect = CGRect(
             x: (bounds.width - size.width) / 2 - 18,
-            y: bounds.height - size.height - 28,
+            y: bounds.height - panelHeight - menuBarInset - 12,
             width: size.width + 36,
-            height: size.height + 16
+            height: panelHeight
         )
         NSColor.black.withAlphaComponent(0.78).setFill()
         NSBezierPath(roundedRect: panelRect, xRadius: 10, yRadius: 10).fill()

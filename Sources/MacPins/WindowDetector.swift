@@ -22,12 +22,15 @@ enum WindowDetector {
     }
 
     static func windowInfo(windowID: CGWindowID) -> ForeignWindow? {
-        guard let raw = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID)
-                as? [[String: Any]],
-              let entry = raw.first else {
+        guard let entry = rawWindowInfo(windowID: windowID) else {
             return nil
         }
         return makeWindow(from: entry, requireNormalLayer: false)
+    }
+
+    static func isWindowOnScreen(windowID: CGWindowID) -> Bool {
+        guard let entry = rawWindowInfo(windowID: windowID) else { return false }
+        return (entry[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false
     }
 
     static func appKitFrame(forCGFrame frame: CGRect) -> CGRect {
@@ -39,8 +42,29 @@ enum WindowDetector {
         )
     }
 
+    static func cgFrame(forAppKitFrame frame: CGRect) -> CGRect {
+        CGRect(
+            x: frame.origin.x,
+            y: primaryScreenHeight - frame.maxY,
+            width: frame.width,
+            height: frame.height
+        )
+    }
+
+    static func cgPoint(forAppKitPoint point: CGPoint) -> CGPoint {
+        CGPoint(x: point.x, y: primaryScreenHeight - point.y)
+    }
+
     private static var primaryScreenHeight: CGFloat {
         NSScreen.screens.first?.frame.height ?? NSScreen.main?.frame.height ?? 0
+    }
+
+    private static func rawWindowInfo(windowID: CGWindowID) -> [String: Any]? {
+        guard let raw = CGWindowListCopyWindowInfo(.optionIncludingWindow, windowID)
+                as? [[String: Any]] else {
+            return nil
+        }
+        return raw.first
     }
 
     private static func visibleWindows() -> [ForeignWindow] {

@@ -19,6 +19,12 @@ cp "Info.plist" "$app_dir/Contents/Info.plist"
 iconset_dir="$project_dir/.build-icon/AppIcon.iconset"
 swift "$project_dir/Tools/GenerateIcon.swift" "$iconset_dir"
 iconutil -c icns "$iconset_dir" -o "$app_dir/Contents/Resources/AppIcon.icns"
-codesign --force --deep --sign - "$app_dir"
+signing_identity="${MACPINS_CODE_SIGN_IDENTITY:-Apple Development: jeffreyzhou3@icloud.com (84Z3774UP9)}"
+if ! security find-identity -v -p codesigning | grep -Fq "\"$signing_identity\""; then
+    echo "Required stable code-signing identity was not found: $signing_identity" >&2
+    exit 1
+fi
+codesign --force --deep --timestamp=none --identifier app.macpins.utility \
+    --sign "$signing_identity" "$app_dir"
 
 echo "$app_dir"

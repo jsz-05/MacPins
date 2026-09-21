@@ -1,49 +1,73 @@
 import AppKit
+import ApplicationServices
 
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     var onPinWindow: (() -> Void)?
     var onHideToMenuBar: (() -> Void)?
     var onUnpinAll: (() -> Void)?
+    var onEnableScreenRecording: (() -> Void)?
+    var onEnableAccessibility: (() -> Void)?
+    var onSetSourceParking: ((Bool) -> Void)?
 
     private let pinnedWindowsLabel = NSTextField(labelWithString: "No windows are pinned.")
-    private let unpinAllButton = NSButton(
-        title: "Unpin All",
+    private let unpinAllButton = NSButton(title: "Unpin All", target: nil, action: nil)
+    private let sourceParkingCheckbox = NSButton(
+        checkboxWithTitle: "Park the original window at the screen edge while pinned",
         target: nil,
         action: nil
     )
+    private let screenRecordingStatus = NSTextField(labelWithString: "Checking…")
+    private let accessibilityStatus = NSTextField(labelWithString: "Checking…")
+    private let screenRecordingButton = NSButton(title: "Enable…", target: nil, action: nil)
+    private let accessibilityButton = NSButton(title: "Enable…", target: nil, action: nil)
+    private var permissionTimer: Timer?
 
     init() {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 560, height: 500),
+            contentRect: NSRect(x: 0, y: 0, width: 620, height: 780),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "MacPins"
-        window.minSize = NSSize(width: 520, height: 470)
+        window.minSize = NSSize(width: 580, height: 740)
         window.isReleasedWhenClosed = false
+        window.level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 2)
+        window.collectionBehavior = [.moveToActiveSpace]
         window.center()
 
         super.init(window: window)
         window.delegate = self
         window.contentViewController = makeContentViewController()
-        window.setContentSize(NSSize(width: 560, height: 500))
+        window.setContentSize(NSSize(width: 620, height: 780))
         window.center()
 
         let minimizeButton = window.standardWindowButton(.miniaturizeButton)
         minimizeButton?.target = self
         minimizeButton?.action = #selector(hideToMenuBar)
+
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            self?.refreshPermissions()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        permissionTimer = timer
     }
 
     required init?(coder: NSCoder) {
         fatalError("init(coder:) has not been implemented")
     }
 
+    deinit {
+        permissionTimer?.invalidate()
+    }
+
     func show() {
         guard let window else { return }
+        refreshPermissions()
         NSApp.setActivationPolicy(.regular)
         NSRunningApplication.current.activate(options: [.activateAllWindows])
         window.makeKeyAndOrderFront(nil)
+        window.orderFrontRegardless()
     }
 
     func updatePinnedWindows(_ windows: [ForeignWindow]) {
@@ -56,6 +80,28 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
                 .joined(separator: "\n")
         }
         unpinAllButton.isEnabled = !windows.isEmpty
+    }
+
+    func updateSourceParking(enabled: Bool) {
+        sourceParkingCheckbox.state = enabled ? .on : .off
+        refreshPermissions()
+    }
+
+    func updatePermissions(screenRecording: Bool, accessibility: Bool) {
+        stylePermissionStatus(screenRecordingStatus, isEnabled: screenRecording)
+        screenRecordingButton.isHidden = screenRecording
+
+        if accessibility {
+            accessibilityStatus.stringValue = "Enabled"
+            accessibilityStatus.textColor = .systemGreen
+        } else if sourceParkingCheckbox.state == .on {
+            accessibilityStatus.stringValue = "Required for parking"
+            accessibilityStatus.textColor = .systemOrange
+        } else {
+            accessibilityStatus.stringValue = "Optional"
+            accessibilityStatus.textColor = .secondaryLabelColor
+        }
+        accessibilityButton.isHidden = accessibility
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -76,6 +122,30 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         onUnpinAll?()
     }
 
+    @objc private func enableScreenRecording() {
+        onEnableScreenRecording?()
+    }
+
+    @objc private func enableAccessibility() {
+        onEnableAccessibility?()
+    }
+
+    @objc private func toggleSourceParking() {
+        onSetSourceParking?(sourceParkingCheckbox.state == .on)
+    }
+
+    private func refreshPermissions() {
+        updatePermissions(
+            screenRecording: CGPreflightScreenCaptureAccess(),
+            accessibility: AXIsProcessTrusted()
+        )
+    }
+
+    private func stylePermissionStatus(_ label: NSTextField, isEnabled: Bool) {
+        label.stringValue = isEnabled ? "Enabled" : "Not enabled"
+        label.textColor = isEnabled ? .systemGreen : .systemOrange
+    }
+
     private func makeContentViewController() -> NSViewController {
         let controller = NSViewController()
         let root = NSView()
@@ -89,8 +159,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         title.font = .systemFont(ofSize: 30, weight: .bold)
         title.alignment = .center
 
+        let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "Unknown"
+        let versionLabel = NSTextField(labelWithString: "Version \(version)")
+        versionLabel.font = .systemFont(ofSize: 10.5)
+        versionLabel.textColor = .tertiaryLabelColor
+        versionLabel.alignment = .center
+
         let subtitle = NSTextField(
-            wrappingLabelWithString: "Keep FaceTime or almost any other window visible above your work."
+            wrappingLabelWithString: "Keep FaceTime, video, or almost any other window visible above your work."
         )
         subtitle.font = .systemFont(ofSize: 14)
         subtitle.textColor = .secondaryLabelColor
@@ -110,48 +188,16 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         shortcut.font = .systemFont(ofSize: 12)
         shortcut.alignment = .center
 
-        let pinnedHeading = NSTextField(labelWithString: "Pinned windows")
-        pinnedHeading.font = .systemFont(ofSize: 13, weight: .semibold)
+        let usage = NSTextField(
+            wrappingLabelWithString: "Pinned views are deliberately view-only. Drag anywhere except the red pin to move the mirror; use the original app or its Picture in Picture controls to interact."
+        )
+        usage.font = .systemFont(ofSize: 12)
+        usage.textColor = .secondaryLabelColor
+        usage.alignment = .center
 
-        pinnedWindowsLabel.maximumNumberOfLines = 4
-        pinnedWindowsLabel.lineBreakMode = .byTruncatingTail
-        pinnedWindowsLabel.textColor = .secondaryLabelColor
-
-        unpinAllButton.target = self
-        unpinAllButton.action = #selector(unpinAll)
-        unpinAllButton.bezelStyle = .inline
-        unpinAllButton.isEnabled = false
-
-        let pinnedRow = NSStackView(views: [pinnedWindowsLabel, unpinAllButton])
-        pinnedRow.orientation = .horizontal
-        pinnedRow.alignment = .top
-        pinnedRow.spacing = 12
-        pinnedWindowsLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        unpinAllButton.setContentHuggingPriority(.required, for: .horizontal)
-
-        let pinnedBox = NSBox()
-        pinnedBox.boxType = .custom
-        pinnedBox.borderWidth = 1
-        pinnedBox.cornerRadius = 9
-        pinnedBox.borderColor = .separatorColor
-        pinnedBox.fillColor = .controlBackgroundColor
-
-        let pinnedBoxContent = NSView()
-        pinnedBox.contentView = pinnedBoxContent
-        pinnedHeading.translatesAutoresizingMaskIntoConstraints = false
-        pinnedRow.translatesAutoresizingMaskIntoConstraints = false
-        pinnedBoxContent.addSubview(pinnedHeading)
-        pinnedBoxContent.addSubview(pinnedRow)
-
-        NSLayoutConstraint.activate([
-            pinnedHeading.topAnchor.constraint(equalTo: pinnedBoxContent.topAnchor, constant: 10),
-            pinnedHeading.leadingAnchor.constraint(equalTo: pinnedBoxContent.leadingAnchor, constant: 12),
-            pinnedHeading.trailingAnchor.constraint(lessThanOrEqualTo: pinnedBoxContent.trailingAnchor, constant: -12),
-            pinnedRow.topAnchor.constraint(equalTo: pinnedHeading.bottomAnchor, constant: 8),
-            pinnedRow.leadingAnchor.constraint(equalTo: pinnedBoxContent.leadingAnchor, constant: 12),
-            pinnedRow.trailingAnchor.constraint(equalTo: pinnedBoxContent.trailingAnchor, constant: -12),
-            pinnedRow.bottomAnchor.constraint(lessThanOrEqualTo: pinnedBoxContent.bottomAnchor, constant: -10),
-        ])
+        let pinnedBox = makePinnedBox()
+        let sourceBox = makeSourceBox()
+        let permissionsBox = makePermissionsBox()
 
         let hiddenBarIsRunning = NSWorkspace.shared.runningApplications.contains {
             $0.localizedName == "Hidden Bar"
@@ -164,7 +210,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         menuBarNotice.alignment = .center
 
         let footer = NSTextField(
-            wrappingLabelWithString: "Click the yellow minimize button to hide this window and the Dock icon. MacPins will keep running from the menu-bar pin."
+            wrappingLabelWithString: "Click the yellow minimize button to hide this window and the Dock icon. MacPins keeps running from the menu-bar pin."
         )
         footer.textColor = .tertiaryLabelColor
         footer.font = .systemFont(ofSize: 11)
@@ -173,10 +219,14 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         let stack = NSStackView(views: [
             iconView,
             title,
+            versionLabel,
             subtitle,
             pinButton,
             shortcut,
+            usage,
             pinnedBox,
+            sourceBox,
+            permissionsBox,
             menuBarNotice,
             footer,
         ])
@@ -184,30 +234,169 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         stack.alignment = .centerX
         stack.spacing = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.setCustomSpacing(14, after: subtitle)
-        stack.setCustomSpacing(14, after: shortcut)
+        stack.setCustomSpacing(12, after: subtitle)
+        stack.setCustomSpacing(3, after: title)
+        stack.setCustomSpacing(12, after: shortcut)
+        stack.setCustomSpacing(12, after: usage)
         stack.setCustomSpacing(12, after: pinnedBox)
+        stack.setCustomSpacing(12, after: sourceBox)
+        stack.setCustomSpacing(12, after: permissionsBox)
         root.addSubview(stack)
 
-        pinnedBox.translatesAutoresizingMaskIntoConstraints = false
-        subtitle.translatesAutoresizingMaskIntoConstraints = false
-        menuBarNotice.translatesAutoresizingMaskIntoConstraints = false
-        footer.translatesAutoresizingMaskIntoConstraints = false
+        [subtitle, usage, pinnedBox, sourceBox, permissionsBox, menuBarNotice, footer]
+            .forEach { $0.translatesAutoresizingMaskIntoConstraints = false }
 
         NSLayoutConstraint.activate([
-            iconView.widthAnchor.constraint(equalToConstant: 68),
-            iconView.heightAnchor.constraint(equalToConstant: 68),
-            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 22),
+            iconView.widthAnchor.constraint(equalToConstant: 58),
+            iconView.heightAnchor.constraint(equalToConstant: 58),
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 18),
             stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 34),
             stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -34),
-            stack.bottomAnchor.constraint(lessThanOrEqualTo: root.bottomAnchor, constant: -20),
-            pinnedBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            pinnedBox.heightAnchor.constraint(equalToConstant: 88),
+            stack.bottomAnchor.constraint(lessThanOrEqualTo: root.bottomAnchor, constant: -18),
             subtitle.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            usage.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            pinnedBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            pinnedBox.heightAnchor.constraint(equalToConstant: 82),
+            sourceBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            sourceBox.heightAnchor.constraint(equalToConstant: 120),
+            permissionsBox.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            permissionsBox.heightAnchor.constraint(equalToConstant: 150),
             menuBarNotice.widthAnchor.constraint(equalTo: stack.widthAnchor),
             footer.widthAnchor.constraint(equalTo: stack.widthAnchor),
         ])
 
         return controller
+    }
+
+    private func makePinnedBox() -> NSBox {
+        let heading = NSTextField(labelWithString: "Pinned windows")
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        pinnedWindowsLabel.maximumNumberOfLines = 3
+        pinnedWindowsLabel.lineBreakMode = .byTruncatingTail
+        pinnedWindowsLabel.textColor = .secondaryLabelColor
+
+        unpinAllButton.target = self
+        unpinAllButton.action = #selector(unpinAll)
+        unpinAllButton.bezelStyle = .inline
+        unpinAllButton.isEnabled = false
+
+        let row = NSStackView(views: [pinnedWindowsLabel, unpinAllButton])
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.spacing = 12
+        pinnedWindowsLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        unpinAllButton.setContentHuggingPriority(.required, for: .horizontal)
+
+        return boxedView(heading: heading, bodyViews: [row])
+    }
+
+    private func makeSourceBox() -> NSBox {
+        let heading = NSTextField(labelWithString: "Optional source handling")
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        sourceParkingCheckbox.target = self
+        sourceParkingCheckbox.action = #selector(toggleSourceParking)
+        sourceParkingCheckbox.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let detail = NSTextField(
+            wrappingLabelWithString: "Experimental Chrome/video workaround: moves the real source almost entirely offscreen after capture starts, then restores its exact frame when you unpin. This can prevent video from freezing and hides the duplicate."
+        )
+        detail.font = .systemFont(ofSize: 10.5)
+        detail.textColor = .secondaryLabelColor
+
+        return boxedView(heading: heading, bodyViews: [sourceParkingCheckbox, detail])
+    }
+
+    private func makePermissionsBox() -> NSBox {
+        let heading = NSTextField(labelWithString: "Permissions")
+        heading.font = .systemFont(ofSize: 13, weight: .semibold)
+
+        screenRecordingButton.target = self
+        screenRecordingButton.action = #selector(enableScreenRecording)
+        screenRecordingButton.bezelStyle = .rounded
+        screenRecordingButton.controlSize = .small
+        accessibilityButton.target = self
+        accessibilityButton.action = #selector(enableAccessibility)
+        accessibilityButton.bezelStyle = .rounded
+        accessibilityButton.controlSize = .small
+
+        let screen = permissionRow(
+            title: "Screen Recording",
+            detail: "Required for live window pixels. MacPins never saves video.",
+            status: screenRecordingStatus,
+            button: screenRecordingButton
+        )
+        let accessibility = permissionRow(
+            title: "Accessibility",
+            detail: "Optional; used only to park and restore the source window.",
+            status: accessibilityStatus,
+            button: accessibilityButton
+        )
+        return boxedView(heading: heading, bodyViews: [screen, accessibility])
+    }
+
+    private func permissionRow(
+        title: String,
+        detail: String,
+        status: NSTextField,
+        button: NSButton
+    ) -> NSView {
+        let name = NSTextField(labelWithString: title)
+        name.font = .systemFont(ofSize: 12, weight: .medium)
+        let explanation = NSTextField(labelWithString: detail)
+        explanation.font = .systemFont(ofSize: 10.5)
+        explanation.textColor = .secondaryLabelColor
+        let labels = NSStackView(views: [name, explanation])
+        labels.orientation = .vertical
+        labels.alignment = .leading
+        labels.spacing = 1
+
+        status.font = .systemFont(ofSize: 11, weight: .medium)
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        status.setContentHuggingPriority(.required, for: .horizontal)
+
+        let row = NSStackView(views: [labels, status, button])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 10
+        labels.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        return row
+    }
+
+    private func boxedView(heading: NSTextField, bodyViews: [NSView]) -> NSBox {
+        let box = NSBox()
+        box.boxType = .custom
+        box.borderWidth = 1
+        box.cornerRadius = 9
+        box.borderColor = .separatorColor
+        box.fillColor = .controlBackgroundColor
+
+        let content = NSView()
+        box.contentView = content
+        heading.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(heading)
+
+        let body = NSStackView(views: bodyViews)
+        body.orientation = .vertical
+        body.alignment = .leading
+        body.spacing = 8
+        body.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(body)
+
+        NSLayoutConstraint.activate([
+            heading.topAnchor.constraint(equalTo: content.topAnchor, constant: 9),
+            heading.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            heading.trailingAnchor.constraint(lessThanOrEqualTo: content.trailingAnchor, constant: -12),
+            body.topAnchor.constraint(equalTo: heading.bottomAnchor, constant: 7),
+            body.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 12),
+            body.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -12),
+            body.bottomAnchor.constraint(lessThanOrEqualTo: content.bottomAnchor, constant: -9),
+        ])
+
+        for view in bodyViews {
+            view.widthAnchor.constraint(equalTo: body.widthAnchor).isActive = true
+        }
+        return box
     }
 }

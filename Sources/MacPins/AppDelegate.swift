@@ -23,7 +23,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var hotKey: EventHotKeyRef?
     private var hotKeyEventHandler: EventHandlerRef?
-    private var didPromptForAccessibility = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.applicationIconImage = AppIcon.bundled()
@@ -34,16 +33,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         mainWindowController.onPinWindow = { [weak self] in self?.beginWindowSelection() }
         mainWindowController.onHideToMenuBar = { [weak self] in self?.hideToMenuBar() }
         mainWindowController.onUnpinAll = { [weak self] in self?.pinManager.unpinAll() }
+        mainWindowController.onEnableAccessibility = { [weak self] in
+            self?.requestAccessibilityPermission()
+        }
+        mainWindowController.onEnableScreenRecording = { [weak self] in
+            self?.requestScreenRecordingPermission()
+        }
+        mainWindowController.onSetSourceParking = { [weak self] enabled in
+            self?.pinManager.setSourceParkingEnabled(enabled)
+        }
         self.mainWindowController = mainWindowController
 
         pinManager.onChange = { [weak self] in
             self?.updateStatusIcon()
             self?.updateMainWindow()
         }
-        pinManager.onNeedsAccessibility = { [weak self] in self?.requestAccessibilityPermission() }
+        pinManager.onNeedsAccessibility = { [weak self] in
+            self?.requestAccessibilityPermission()
+        }
         pinManager.onError = { [weak self] message in self?.showError(message) }
         updateMainWindow()
         mainWindowController.show()
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        pinManager.refreshSourceParking()
+        updateMainWindow()
     }
 
     func applicationShouldHandleReopen(
@@ -119,6 +134,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
 
+        let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "Unknown"
+        let versionItem = NSMenuItem(
+            title: "MacPins \(version)",
+            action: nil,
+            keyEquivalent: ""
+        )
+        versionItem.isEnabled = false
+        menu.addItem(versionItem)
         addItem(to: menu, title: "Open MacPins", action: #selector(showMainWindow))
         menu.addItem(.separator())
         addItem(to: menu, title: "Pin a Window…", action: #selector(beginWindowSelection))
@@ -151,21 +176,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             action: #selector(toggleAllSpaces(_:))
         )
         allSpaces.state = WindowOverlay.pinToAllSpaces ? .on : .off
-
-        let forwarding = addItem(
+        let parkSources = addItem(
             to: menu,
-            title: "Forward Clicks and Scrolling",
-            action: #selector(toggleEventForwarding(_:))
+            title: "Park Sources at Screen Edge (Experimental)",
+            action: #selector(toggleSourceParking(_:))
         )
-        forwarding.state = WindowOverlay.forwardEvents ? .on : .off
-
-        if !AXIsProcessTrusted() {
-            addItem(
-                to: menu,
-                title: "Enable Window Interaction…",
-                action: #selector(enableAccessibility)
-            )
-        }
+        parkSources.state = pinManager.sourceParkingEnabled ? .on : .off
+        addItem(to: menu, title: "Permissions…", action: #selector(showMainWindow))
 
         menu.addItem(.separator())
         addItem(to: menu, title: "About MacPins", action: #selector(showAbout))
@@ -187,12 +204,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func beginWindowSelection() {
         guard !windowSelector.isSelecting else { return }
+        guard screenCapturePermissionIsAvailable() else { return }
         mainWindowController?.window?.orderOut(nil)
         windowSelector.begin { [weak self] window in
             guard let self else { return }
-            self.showMainWindow()
-            guard let window else { return }
+            guard let window else {
+                self.showMainWindow()
+                return
+            }
             self.toggle(window: window)
+            self.hideToMenuBar()
         }
     }
 
@@ -214,18 +235,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pinManager.pin(window: window)
     }
 
-    private func screenCapturePermissionIsAvailable() -> Bool {
-        if CGPreflightScreenCaptureAccess() { return true }
-        if CGRequestScreenCaptureAccess() { return true }
-
-        showError(
-            "Screen Recording permission is required to mirror another app's window. "
-                + "Allow MacPins in System Settings → Privacy & Security → Screen & System Audio Recording, "
-                + "then quit and reopen MacPins."
-        )
-        return false
-    }
-
     @objc private func unpinMenuItem(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? NSNumber else { return }
         pinManager.unpin(windowID: id.uint32Value)
@@ -241,32 +250,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pinManager.updateAllSpacesSetting()
     }
 
-    @objc private func toggleEventForwarding(_ sender: NSMenuItem) {
-        UserDefaults.standard.set(!WindowOverlay.forwardEvents, forKey: "forwardEvents")
-    }
-
-    @objc private func enableAccessibility() {
-        requestAccessibilityPermission()
+    @objc private func toggleSourceParking(_ sender: NSMenuItem) {
+        pinManager.setSourceParkingEnabled(!pinManager.sourceParkingEnabled)
     }
 
     private func requestAccessibilityPermission() {
-        guard !AXIsProcessTrusted(), !didPromptForAccessibility else { return }
-        didPromptForAccessibility = true
-        let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        guard !AXIsProcessTrusted() else {
+            updateMainWindow()
+            return
+        }
+        let options = [
+            kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true
+        ] as CFDictionary
         _ = AXIsProcessTrustedWithOptions(options)
+        updateMainWindow()
+        openPrivacyPane("Privacy_Accessibility")
+    }
+
+    private func requestScreenRecordingPermission() {
+        if !CGPreflightScreenCaptureAccess(), !CGRequestScreenCaptureAccess() {
+            openPrivacyPane("Privacy_ScreenCapture")
+        }
+        updateMainWindow()
+    }
+
+    private func screenCapturePermissionIsAvailable() -> Bool {
+        if CGPreflightScreenCaptureAccess() { return true }
+        if CGRequestScreenCaptureAccess() {
+            updateMainWindow()
+            return true
+        }
+
+        openPrivacyPane("Privacy_ScreenCapture")
         showError(
-            "Accessibility permission lets clicks and scrolling reach a pinned window. "
-                + "Enable MacPins in System Settings → Privacy & Security → Accessibility. "
-                + "Viewing pinned windows works without it."
+            "Screen Recording is required to display a live pinned window. Enable MacPins in Privacy & Security → Screen & System Audio Recording, then reopen MacPins."
         )
+        return false
+    }
+
+    private func openPrivacyPane(_ pane: String) {
+        guard let url = URL(
+            string: "x-apple.systempreferences:com.apple.preference.security?\(pane)"
+        ) else { return }
+        NSWorkspace.shared.open(url)
     }
 
     @objc private func showAbout() {
+        let version = Bundle.main.object(
+            forInfoDictionaryKey: "CFBundleShortVersionString"
+        ) as? String ?? "Unknown"
         let alert = NSAlert()
-        alert.messageText = "MacPins"
+        alert.messageText = "MacPins \(version)"
         alert.informativeText = "A small DeskPins-style menu-bar utility for macOS.\n\n"
             + "Click the menu-bar pin and choose Pin a Window, or press Control-Command-P. "
-            + "Click the red pin badge to unpin; Command-click a mirror to switch to the real window."
+            + "The pinned view is intentionally view-only: drag it to move the mirror and "
+            + "click the red badge to unpin. The optional source-parking mode can hide the "
+            + "duplicate source and help Chromium video keep rendering."
         alert.alertStyle = .informational
         present(alert)
     }
@@ -282,6 +321,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateMainWindow() {
         mainWindowController?.updatePinnedWindows(Array(pinManager.pinnedWindows.values))
+        mainWindowController?.updatePermissions(
+            screenRecording: CGPreflightScreenCaptureAccess(),
+            accessibility: AXIsProcessTrusted()
+        )
+        mainWindowController?.updateSourceParking(enabled: pinManager.sourceParkingEnabled)
     }
 
     private func showError(_ message: String) {

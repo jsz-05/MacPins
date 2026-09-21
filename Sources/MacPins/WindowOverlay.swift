@@ -1,42 +1,50 @@
 import AppKit
-import ApplicationServices
 import CoreMedia
 import IOSurface
 import ScreenCaptureKit
 
+/// A live floating view of a window owned by another application.
+///
+/// macOS does not allow MacPins to change another process's NSWindow level,
+/// so the pin is a ScreenCaptureKit surface hosted in a panel MacPins owns.
+/// The panel moves independently of the source.  This is important: moving
+/// the source and polling its position made older builds visibly trail it.
 final class WindowOverlay: NSPanel {
     let targetWindowID: CGWindowID
     let targetPID: pid_t
 
     var onUnpin: (() -> Void)?
-    var onNeedsAccessibility: (() -> Void)?
+    var onReady: (() -> Void)?
     var onFailure: ((String) -> Void)?
 
-    private let contentLayer = CALayer()
-    private let pinBadge = PinBadgeView(frame: CGRect(x: 8, y: 8, width: 28, height: 28))
+    private let imageLayer = CALayer()
     private let sampleQueue: DispatchQueue
-    private var scWindow: SCWindow?
+    private let frameLock = NSLock()
     private var captureStream: SCStream?
+    private var capturedWindow: SCWindow?
     private var displayedFrame: CVPixelBuffer?
-    private var syncTimer: Timer?
+    private var pendingFrame: CVPixelBuffer?
+    private var frameDeliveryScheduled = false
     private var streamPixelScale: CGFloat = 2
-    private var lastStreamSize: CGSize = .zero
-    private(set) var isPinVisible = false
+    private var isRunning = false
+    private var didSignalReady = false
+    private var recoveryGeneration = 0
 
     static var pinToAllSpaces: Bool {
         UserDefaults.standard.object(forKey: "pinToAllSpaces") as? Bool ?? true
     }
 
-    static var forwardEvents: Bool {
-        UserDefaults.standard.object(forKey: "forwardEvents") as? Bool ?? true
-    }
-
     init(window: ForeignWindow) {
         targetWindowID = window.windowID
         targetPID = window.ownerPID
-        sampleQueue = DispatchQueue(label: "app.macpins.capture.\(window.windowID)")
+        sampleQueue = DispatchQueue(
+            label: "app.macpins.capture.\(window.windowID)",
+            qos: .userInteractive
+        )
 
         let initialFrame = WindowDetector.appKitFrame(forCGFrame: window.bounds)
+        let content = OverlayContentView(frame: CGRect(origin: .zero, size: initialFrame.size))
+
         super.init(
             contentRect: initialFrame,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -45,196 +53,155 @@ final class WindowOverlay: NSPanel {
         )
 
         level = .floating
+        isReleasedWhenClosed = false
         isOpaque = false
         backgroundColor = .clear
         hasShadow = true
         isFloatingPanel = true
         hidesOnDeactivate = false
-        collectionBehavior = Self.pinToAllSpaces
-            ? [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-            : [.fullScreenAuxiliary]
+        animationBehavior = .none
+        isMovableByWindowBackground = false
+        updateCollectionBehavior()
 
-        let root = NSView(frame: CGRect(origin: .zero, size: initialFrame.size))
-        root.wantsLayer = true
-        contentLayer.frame = root.bounds
-        contentLayer.contentsGravity = .resize
-        contentLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
-        root.layer?.addSublayer(contentLayer)
+        content.wantsLayer = true
+        content.layer = CALayer()
+        content.layer?.backgroundColor = NSColor.black.cgColor
+        content.layer?.cornerRadius = 8
+        content.layer?.cornerCurve = .continuous
+        content.layer?.masksToBounds = true
 
-        pinBadge.frame.origin = CGPoint(x: 8, y: max(initialFrame.height - 36, 0))
-        pinBadge.autoresizingMask = [.minYMargin]
-        root.addSubview(pinBadge)
-        contentView = root
+        imageLayer.frame = content.bounds
+        imageLayer.autoresizingMask = [.layerWidthSizable, .layerHeightSizable]
+        imageLayer.contentsGravity = .resize
+        imageLayer.contentsScale = screen?.backingScaleFactor ?? 2
+        imageLayer.backgroundColor = NSColor.black.cgColor
+        imageLayer.minificationFilter = .trilinear
+        imageLayer.magnificationFilter = .linear
+        content.layer?.addSublayer(imageLayer)
+
+        let badgeSize = CGSize(width: 28, height: 28)
+        let badge = PinBadgeView(
+            frame: CGRect(
+                x: 8,
+                y: max(initialFrame.height - badgeSize.height - 8, 0),
+                width: badgeSize.width,
+                height: badgeSize.height
+            )
+        )
+        badge.autoresizingMask = [.minYMargin]
+        badge.onClick = { [weak self] in self?.onUnpin?() }
+        content.addSubview(badge)
+
+        contentView = content
     }
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
 
     func start() {
-        guard captureStream == nil else { return }
-        isPinVisible = true
-        syncFrameWithTarget()
+        guard !isRunning else { return }
+        isRunning = true
+        recoveryGeneration += 1
+        resolveAndStart(showInitialFrame: true)
+    }
 
-        Task { @MainActor in
+    /// Reassert the panel's global floating order without activating MacPins.
+    func ensureOnTop() {
+        guard isRunning else { return }
+        level = .floating
+        orderFrontRegardless()
+    }
+
+    func updateCollectionBehavior() {
+        var behavior: NSWindow.CollectionBehavior = [
+            .fullScreenAuxiliary,
+            .stationary,
+            .transient,
+            .ignoresCycle,
+        ]
+        if Self.pinToAllSpaces {
+            behavior.insert(.canJoinAllSpaces)
+        }
+        collectionBehavior = behavior
+    }
+
+    func closeOverlay() {
+        guard isRunning else { return }
+        isRunning = false
+        recoveryGeneration += 1
+        stopStream()
+        frameLock.lock()
+        pendingFrame = nil
+        frameDeliveryScheduled = false
+        frameLock.unlock()
+        orderOut(nil)
+    }
+
+    private func resolveAndStart(showInitialFrame: Bool) {
+        Task { @MainActor [weak self] in
+            guard let self, self.isRunning else { return }
             do {
                 let content = try await SCShareableContent.excludingDesktopWindows(
                     false,
                     onScreenWindowsOnly: false
                 )
-                guard let window = content.windows.first(where: { $0.windowID == targetWindowID }) else {
-                    onFailure?("The selected window is no longer available.")
+                guard let window = content.windows.first(where: {
+                    $0.windowID == self.targetWindowID
+                }) else {
+                    self.onFailure?("The selected window is no longer available.")
                     return
                 }
-                guard isPinVisible else { return }
-                scWindow = window
-                try await showInitialFrame(for: window)
-                startStream(for: window)
-                startFrameSync()
+
+                self.capturedWindow = window
+                let filter = SCContentFilter(desktopIndependentWindow: window)
+                self.streamPixelScale = max(CGFloat(filter.pointPixelScale), 1)
+
+                if showInitialFrame {
+                    let configuration = self.streamConfiguration()
+                    let image = try await SCScreenshotManager.captureImage(
+                        contentFilter: filter,
+                        configuration: configuration
+                    )
+                    guard self.isRunning else { return }
+                    self.imageLayer.contents = image
+                    self.ensureOnTop()
+                }
+
+                self.startStream(for: window)
             } catch {
-                onFailure?("MacPins could not capture this window: \(error.localizedDescription)")
+                guard self.isRunning else { return }
+                self.onFailure?("MacPins could not capture this window: \(error.localizedDescription)")
             }
-        }
-    }
-
-    func bringToFront() {
-        guard !isPinVisible else { return }
-        isPinVisible = true
-        syncFrameWithTarget()
-        level = .floating
-        orderFront(nil)
-        if let scWindow { startStream(for: scWindow) }
-        startFrameSync()
-    }
-
-    func sendBehind() {
-        guard isPinVisible else { return }
-        isPinVisible = false
-        stopStream()
-        stopFrameSync()
-        level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.normalWindow)) - 1)
-        orderBack(nil)
-    }
-
-    func closeOverlay() {
-        isPinVisible = false
-        stopStream()
-        stopFrameSync()
-        orderOut(nil)
-    }
-
-    func updateCollectionBehavior() {
-        collectionBehavior = Self.pinToAllSpaces
-            ? [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
-            : [.fullScreenAuxiliary]
-    }
-
-    override func sendEvent(_ event: NSEvent) {
-        if event.type == .leftMouseDown, pinBadge.frame.contains(event.locationInWindow) {
-            onUnpin?()
-            return
-        }
-
-        guard isPinVisible, Self.forwardEvents else {
-            super.sendEvent(event)
-            return
-        }
-
-        switch event.type {
-        case .leftMouseDown where event.modifierFlags.contains(.command):
-            activateRealWindow()
-        case .leftMouseDown, .leftMouseUp, .leftMouseDragged,
-             .rightMouseDown, .rightMouseUp, .rightMouseDragged,
-             .otherMouseDown, .otherMouseUp, .otherMouseDragged,
-             .scrollWheel:
-            guard AXIsProcessTrusted() else {
-                onNeedsAccessibility?()
-                return
-            }
-            EventForwarder.forward(event, from: self)
-        default:
-            super.sendEvent(event)
-        }
-    }
-
-    private func activateRealWindow() {
-        sendBehind()
-        guard let runningApp = NSRunningApplication(processIdentifier: targetPID) else { return }
-        runningApp.activate(options: [.activateAllWindows])
-        raiseMatchingAccessibilityWindow()
-    }
-
-    private func raiseMatchingAccessibilityWindow() {
-        guard AXIsProcessTrusted(),
-              let target = WindowDetector.windowInfo(windowID: targetWindowID) else { return }
-
-        let app = AXUIElementCreateApplication(targetPID)
-        var value: AnyObject?
-        guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
-              let windows = value as? [AXUIElement] else { return }
-
-        for window in windows {
-            var positionValue: AnyObject?
-            var sizeValue: AnyObject?
-            guard AXUIElementCopyAttributeValue(window, kAXPositionAttribute as CFString, &positionValue) == .success,
-                  AXUIElementCopyAttributeValue(window, kAXSizeAttribute as CFString, &sizeValue) == .success,
-                  let positionAX = positionValue as! AXValue?,
-                  let sizeAX = sizeValue as! AXValue? else { continue }
-            var position = CGPoint.zero
-            var size = CGSize.zero
-            AXValueGetValue(positionAX, .cgPoint, &position)
-            AXValueGetValue(sizeAX, .cgSize, &size)
-            if abs(position.x - target.bounds.minX) < 5,
-               abs(position.y - target.bounds.minY) < 5,
-               abs(size.width - target.bounds.width) < 5,
-               abs(size.height - target.bounds.height) < 5 {
-                AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-                return
-            }
-        }
-    }
-
-    private func showInitialFrame(for window: SCWindow) async throws {
-        let filter = SCContentFilter(desktopIndependentWindow: window)
-        streamPixelScale = max(CGFloat(filter.pointPixelScale), 1)
-        let configuration = streamConfiguration(scale: streamPixelScale)
-        let image = try await SCScreenshotManager.captureImage(
-            contentFilter: filter,
-            configuration: configuration
-        )
-        guard isPinVisible else { return }
-        contentLayer.contents = image
-        level = .floating
-        alphaValue = 0
-        orderFront(nil)
-        await NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.12
-            animator().alphaValue = 1
         }
     }
 
     private func startStream(for window: SCWindow) {
-        guard captureStream == nil, isPinVisible else { return }
+        guard isRunning, captureStream == nil else { return }
         let filter = SCContentFilter(desktopIndependentWindow: window)
         streamPixelScale = max(CGFloat(filter.pointPixelScale), 1)
-        lastStreamSize = frame.size
         let stream = SCStream(
             filter: filter,
-            configuration: streamConfiguration(scale: streamPixelScale),
+            configuration: streamConfiguration(),
             delegate: self
         )
+
         do {
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: sampleQueue)
             captureStream = stream
             stream.startCapture { [weak self] error in
-                guard let error else { return }
+                guard let self, let error else { return }
                 DispatchQueue.main.async {
-                    guard self?.captureStream === stream else { return }
-                    self?.captureStream = nil
-                    self?.onFailure?("The capture stream stopped: \(error.localizedDescription)")
+                    guard self.captureStream === stream else { return }
+                    self.captureStream = nil
+                    self.scheduleRecovery(after: error)
                 }
             }
+            if !didSignalReady {
+                didSignalReady = true
+                onReady?()
+            }
         } catch {
-            onFailure?("MacPins could not start the capture stream: \(error.localizedDescription)")
+            scheduleRecovery(after: error)
         }
     }
 
@@ -244,47 +211,60 @@ final class WindowOverlay: NSPanel {
         stream.stopCapture { _ in }
     }
 
-    private func streamConfiguration(scale: CGFloat) -> SCStreamConfiguration {
+    private func streamConfiguration() -> SCStreamConfiguration {
         let configuration = SCStreamConfiguration()
-        configuration.width = max(Int(frame.width * scale), 1)
-        configuration.height = max(Int(frame.height * scale), 1)
+        configuration.width = max(Int(frame.width * streamPixelScale), 1)
+        configuration.height = max(Int(frame.height * streamPixelScale), 1)
         configuration.captureResolution = .best
         configuration.scalesToFit = true
         configuration.showsCursor = false
         configuration.pixelFormat = kCVPixelFormatType_32BGRA
-        configuration.queueDepth = 4
-        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+        configuration.queueDepth = 5
+        configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
         return configuration
     }
 
-    private func startFrameSync() {
-        syncTimer?.invalidate()
-        syncTimer = Timer.scheduledTimer(withTimeInterval: 0.35, repeats: true) { [weak self] _ in
-            self?.syncFrameWithTarget()
-        }
+    private func updateStreamSize() {
+        guard let stream = captureStream else { return }
+        stream.updateConfiguration(streamConfiguration()) { _ in }
     }
 
-    private func stopFrameSync() {
-        syncTimer?.invalidate()
-        syncTimer = nil
-    }
+    private func scheduleRecovery(after lastError: Error) {
+        guard isRunning else { return }
+        recoveryGeneration += 1
+        let generation = recoveryGeneration
 
-    private func syncFrameWithTarget() {
-        guard let target = WindowDetector.windowInfo(windowID: targetWindowID) else { return }
-        let nextFrame = WindowDetector.appKitFrame(forCGFrame: target.bounds)
-        if frame != nextFrame {
-            setFrame(nextFrame, display: false)
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            for _ in 0..<4 {
+                try? await Task.sleep(nanoseconds: 750_000_000)
+                guard self.isRunning,
+                      self.recoveryGeneration == generation,
+                      self.captureStream == nil else { return }
+                do {
+                    let content = try await SCShareableContent.excludingDesktopWindows(
+                        false,
+                        onScreenWindowsOnly: false
+                    )
+                    if let window = content.windows.first(where: {
+                        $0.windowID == self.targetWindowID
+                    }) {
+                        self.capturedWindow = window
+                        self.startStream(for: window)
+                        return
+                    }
+                } catch {
+                    // Retry; display/Space transitions can briefly interrupt enumeration.
+                }
+            }
+            guard self.isRunning, self.recoveryGeneration == generation else { return }
+            self.onFailure?(
+                "The pinned window closed or its capture stopped: \(lastError.localizedDescription)"
+            )
         }
-
-        guard let stream = captureStream,
-              abs(nextFrame.width - lastStreamSize.width) > 1
-                || abs(nextFrame.height - lastStreamSize.height) > 1 else { return }
-        lastStreamSize = nextFrame.size
-        stream.updateConfiguration(streamConfiguration(scale: streamPixelScale)) { _ in }
     }
 
     deinit {
-        syncTimer?.invalidate()
         captureStream?.stopCapture { _ in }
     }
 }
@@ -302,30 +282,84 @@ extension WindowOverlay: SCStreamOutput, SCStreamDelegate {
               ) as? [[SCStreamFrameInfo: Any]],
               let status = attachments.first?[.status] as? Int,
               status == SCFrameStatus.complete.rawValue,
-              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
-              let surface = CVPixelBufferGetIOSurface(pixelBuffer) else { return }
+              let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
-        let retainedSurface = surface.takeUnretainedValue()
-        DispatchQueue.main.async { [weak self] in
-            self?.displayedFrame = pixelBuffer
-            self?.contentLayer.contents = retainedSurface
+        // Keep only the newest frame. Enqueuing every frame on the main thread
+        // creates a stale-frame backlog whenever the UI is briefly busy, which
+        // looks like a low-frame-rate mirror trailing behind the source.
+        frameLock.lock()
+        pendingFrame = pixelBuffer
+        let shouldSchedule = !frameDeliveryScheduled
+        frameDeliveryScheduled = true
+        frameLock.unlock()
+
+        if shouldSchedule {
+            DispatchQueue.main.async { [weak self] in
+                self?.displayLatestFrame()
+            }
         }
     }
 
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         DispatchQueue.main.async { [weak self] in
-            guard self?.captureStream === stream else { return }
-            self?.captureStream = nil
-            self?.onFailure?("The capture stream stopped: \(error.localizedDescription)")
+            guard let self, self.captureStream === stream else { return }
+            self.captureStream = nil
+            self.scheduleRecovery(after: error)
         }
     }
 }
 
+private extension WindowOverlay {
+    func displayLatestFrame() {
+        frameLock.lock()
+        let pixelBuffer = pendingFrame
+        pendingFrame = nil
+        frameDeliveryScheduled = false
+        frameLock.unlock()
+
+        guard isRunning,
+              let pixelBuffer,
+              let surface = CVPixelBufferGetIOSurface(pixelBuffer) else { return }
+
+        displayedFrame = pixelBuffer
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        imageLayer.contents = surface.takeUnretainedValue()
+        CATransaction.commit()
+
+    }
+}
+
+/// The live pixels are intentionally view-only. A drag moves only the local
+/// mirror panel and never activates, moves, or focuses the source application.
+private final class OverlayContentView: NSView {
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
+
+    override func resetCursorRects() {
+        addCursorRect(bounds, cursor: .openHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        guard let window else { return }
+        NSCursor.closedHand.push()
+        window.performDrag(with: event)
+        NSCursor.pop()
+    }
+}
+
 private final class PinBadgeView: NSView {
+    var onClick: (() -> Void)?
+
     override var isOpaque: Bool { false }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func resetCursorRects() {
         addCursorRect(bounds, cursor: .pointingHand)
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        onClick?()
     }
 
     override func draw(_ dirtyRect: NSRect) {
