@@ -2,7 +2,7 @@ name: Signed release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "!v*-preview*"]
 
 permissions:
   contents: write

@@ -27,6 +27,14 @@ Never commit these values to the repository.
 
 ## Publish a release
 
+Preview builds without Developer ID credentials can be built locally with
+`MACPINS_CODE_SIGN_IDENTITY=- zsh build-app.sh` and
+`zsh scripts/build-dmg.sh`. Publish them only as GitHub pre-releases with a
+`-preview` tag and clearly state that they are not notarized. Preview tags are
+excluded from the signed release workflow.
+
+For a full release:
+
 Update `CFBundleShortVersionString` and `CFBundleVersion` in `Info.plist`, merge
 the release commit, then create and push a matching tag:
 
